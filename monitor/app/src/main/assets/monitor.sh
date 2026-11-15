@@ -199,6 +199,7 @@ cluster)
             reporting++
             used_cpu += cores($2); used_mem += kib($4)
             rep_cpu += cpu[$1];     rep_mem += mem[$1]
+            measured = measured (measured == "" ? "" : ",") $1
             next
         }
         sec == "pods" && NF >= 4 {
@@ -206,11 +207,12 @@ cluster)
             if ($4 == "Running") pods_running++
         }
         END {
-            printf "%d %d %d %.2f %.0f %.2f %.0f %.2f %.0f %d %d %s %s", nodes,
+            printf "%d %d %d %.2f %.0f %.2f %.0f %.2f %.0f %d %d %s %s %s", nodes,
                    ready_nodes, reporting, cap_cpu, cap_mem, rep_cpu, rep_mem,
                    used_cpu, used_mem, pods_total, pods_running,
                    (node_ready == "" ? "unknown" : node_ready),
-                   (node_version == "" ? "" : node_version)
+                   (node_version == "" ? "" : node_version),
+                   (measured == "" ? "" : measured)
         }')
 
     set -- $agg
@@ -225,8 +227,12 @@ cluster)
         "$(num_or_null "$4")" "$(num_or_null "$5")"
     printf '"cpu_measured_cores":%s,"mem_measured_kb":%s,' \
         "$(num_or_null "$6")" "$(num_or_null "$7")"
-    printf '"cpu_used_cores":%s,"mem_used_kb":%s}}\n' \
+    printf '"cpu_used_cores":%s,"mem_used_kb":%s,' \
         "$(num_or_null "$8")" "$(num_or_null "$9")"
+    # metrics-server cannot scrape every kubelet here, so the usage belongs to a
+    # subset. Name the subset: a percentage without provenance reads as the whole
+    # cluster when it is in fact one node.
+    printf '"measured_nodes":%s}}\n' "$(json_str "${14}")"
     ;;
 
 *)

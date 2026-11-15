@@ -40,12 +40,22 @@ SERVIÇOS  k3s-agent ●  docker ●  ssh ●  tailscaled ●
 | NODE | `cpu_permill` from the container runtime, permille of the **whole** container | `ram_used_kb` of `ram_limit_kb` | `droidspaces --json show` |
 | CLUSTER | `kubectl top nodes` against capacity of the nodes that answer | same | metrics-server + `kubectl get nodes` |
 
-`nodes_reporting` is not decoration: metrics-server here only scrapes some kubelets
-(the local and mobile ones time out), so the cluster percentage is computed against the
-capacity of the nodes that actually report, and the card says how many of the total that
-is. With one of three nodes reporting, cluster CPU is `1.1 of 4` cores, not `1.1 of 20`.
-The footnote turns amber whenever the coverage is partial, so the number is never read as
-the whole cluster when it is not.
+### The cluster card is honest about what it measures
+
+metrics-server cannot scrape every kubelet here (the local node is down and the mobile one
+times out), so the only node it answers for is `k3s-master`. That means the cluster
+percentage is, in practice, the master's percentage — and the card says so instead of
+letting a number pass for cluster-wide:
+
+```text
+CLUSTER    CPU 28%   1,1 de 4 núcleos        RAM 74%   8,6 de 11,7 GB
+           medido em k3s-master · 1 de 3 nós · 35/53 pods      <- amber when partial
+```
+
+The collector emits `measured_nodes` with the names it actually got, capacity is
+aggregated over that subset, and the footnote turns amber whenever `nodes_reporting` is
+below `nodes_total`. A percentage computed against the capacity of the node that reported
+is a true statement about that node; against the whole cluster it would be a false one.
 
 ## How it works
 
@@ -54,7 +64,7 @@ JSON object; the app is a renderer.
 
 ```text
 monitor.sh host        every 2 s    /proc/stat · meminfo · pressure · battery · thermal · df
-monitor.sh container   every 5 s    droidspaces --json show · nproc · systemctl is-active
+monitor.sh container   every 5 s    droidspaces --json show · cpuinfo · systemctl is-active
 monitor.sh cluster     every 15 s   kubectl get nodes · top nodes · pods
 ```
 
@@ -64,8 +74,15 @@ Why this way:
 - the contract can be checked from `adb` with no build step;
 - the collector is reusable by cron, ssh or a future exporter.
 
-The three pollers share one root shell, so `RootShell.collect` holds a `Mutex`: without it
-the writes and reads interleave and a section comes back empty (the UI then shows `—`).
+Two root shells, one per lane. Sharing a single shell made a section come back empty,
+because concurrent writes and reads interleave; but a single lock over one shell also
+stalled the 2 s host poll behind a 5 s cluster call, which showed up as a panel updating
+every 15 s. The cluster section therefore runs on its own shell behind its own lock.
+
+The collector is installed from the APK's assets behind an install lock, and only when the
+content differs from what is on the device. Copying it on every launch raced the pollers:
+a section that started mid-copy executed a half-written script and reported a syntax error
+at a random line.
 
 ### Cost per cycle
 
@@ -102,12 +119,30 @@ adb shell cmd package set-home-activity dev.hmedeiros.k3smonitor/.MainActivity
 adb shell settings put global stay_on_while_plugged_in 7
 adb shell dumpsys deviceidle whitelist +dev.hmedeiros.k3smonitor
 adb shell locksettings set-disabled true     # dedicated device: no keyguard
+# Magisk toasts "granted superuser" over the panel on every launch; the policy
+# is already granted, so the notification is pure noise on a kiosk screen.
+adb shell su -c 'magisk --sqlite "UPDATE policies SET notification=0 WHERE uid=10173"'
 ```
 
 The app installs `monitor.sh` from its own assets on first run, so there is no manual push.
 
 Root is granted by Magisk on first launch. If the panel shows `—` everywhere, the cause is
 almost always a missing root grant or a stopped container.
+
+## OLED
+
+The panel is a phone screen left on all day, so the palette is built for an OLED panel:
+
+| Choice | Reason |
+|---|---|
+| background `#000000` | those pixels are off, not merely dark |
+| cards `#0B1013`, tracks `#141D20` | as dark as a surface can be and still read as a card |
+| text `#D8E2E4`, labels `#75858C` | least brightness that stays legible; every lit pixel costs power |
+| no borders, gaps only | borders light a full perimeter for a distinction tone already makes |
+
+Burn-in is the other half of the problem and is not addressed yet: a static layout on an
+OLED panel for months will leave a mark. A slow drift of the whole composition (a few
+pixels every few minutes) is the usual remedy and is not implemented.
 
 ## Build
 
@@ -136,7 +171,9 @@ adb uninstall dev.hmedeiros.k3smonitor
   (`context deadline exceeded` toward `100.92.108.16:10250`). The HOST and NODE cards do
   not depend on it — they read the kernel and the runtime — and the CLUSTER card shows the
   coverage it actually has. Fixing metrics-server is a separate cluster task.
-- The first ~60 s after a reboot show the container and cluster cards empty, because the
-  container is still booting; the next poll fills them in.
+- The first seconds after a reboot show the cluster card as `—` and the pill as
+  `aguardando` while the first `kubectl` round trip runs; that is unknown, not NotReady.
+- The temperature shown is the hottest thermal zone in the phone (85 zones, one `cat`),
+  which during an update is the CPU and at rest is usually the PMIC.
 - The panel is landscape-only by design (`sensorLandscape`); a portrait layout is not
   implemented.

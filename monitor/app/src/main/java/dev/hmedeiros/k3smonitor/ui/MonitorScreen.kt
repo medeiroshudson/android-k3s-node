@@ -28,13 +28,19 @@ import dev.hmedeiros.k3smonitor.data.ClusterMetrics
 import dev.hmedeiros.k3smonitor.data.ContainerMetrics
 import dev.hmedeiros.k3smonitor.data.HostMetrics
 
+/**
+ * Tuned for an OLED panel left on all day: the background is pure black, so
+ * those pixels are simply off, and the surfaces above it are as dark as they can
+ * be while still reading as a card. Text is dimmed to the least brightness that
+ * keeps the panel legible from a distance — every lit pixel costs power here.
+ */
 object Palette {
-    val bg = Color(0xFF0A0F12)
-    val card = Color(0xFF121A1F)
-    val cardSoft = Color(0xFF1A242B)
-    val accent = Color(0xFF7FD1C8)
-    val text = Color(0xFFE7EEF0)
-    val muted = Color(0xFF7E8F96)
+    val bg = Color(0xFF000000)
+    val card = Color(0xFF0B1013)
+    val cardSoft = Color(0xFF141D20)
+    val accent = Color(0xFF6FC5BC)
+    val text = Color(0xFFD8E2E4)
+    val muted = Color(0xFF75858C)
     val ok = Color(0xFF7FD1C8)
     val warn = Color(0xFFE0B25A)
     val bad = Color(0xFFE06C6C)
@@ -102,7 +108,7 @@ fun MonitorScreen(
         }
 
         ServicesRow(container)
-        Footer(error, hostAgeSec)
+        Footer(error)
     }
 }
 
@@ -194,10 +200,19 @@ private fun ClusterCard(cluster: ClusterMetrics?, modifier: Modifier = Modifier)
         footnote = cluster?.let { c ->
             val total = c.nodesTotal
             val reporting = c.nodesReporting
+            val named = c.measuredNodes
+            val coverage = when {
+                // Naming the node is the difference between "the cluster uses 22%"
+                // and "the one node that reports uses 22% of its own capacity".
+                named.isNotEmpty() && total != null && reporting != null ->
+                    "medido em ${named.joinToString(", ")} · $reporting de $total nós"
+                reporting != null && total != null -> "$reporting de $total nós medidos"
+                else -> null
+            }
             val pods = c.podsRunning
             val podsTotal = c.podsTotal
             listOfNotNull(
-                if (total != null && reporting != null) "$reporting de $total nós medidos" else null,
+                coverage,
                 if (pods != null && podsTotal != null) "$pods/$podsTotal pods" else null,
             ).joinToString(" · ").ifEmpty { null }
         },
@@ -294,7 +309,7 @@ private fun Header(cluster: ClusterMetrics?, container: ContainerMetrics?, hostA
             )
         }
         Spacer(Modifier.weight(1f))
-        StatusPill(ready = cluster?.ready == true)
+        StatusPill(ready = cluster?.ready)
         Spacer(Modifier.width(12.dp))
         Text(
             text = "atualizado ${hostAgeSec}s",
@@ -304,8 +319,14 @@ private fun Header(cluster: ClusterMetrics?, container: ContainerMetrics?, hostA
     }
 }
 
+/** null means the cluster has not answered yet, which is not the same as NotReady. */
 @Composable
-private fun StatusPill(ready: Boolean) {
+private fun StatusPill(ready: Boolean?) {
+    val (dot, label) = when (ready) {
+        true -> Palette.ok to "Ready"
+        false -> Palette.bad to "NotReady"
+        null -> Palette.muted to "aguardando"
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -317,15 +338,10 @@ private fun StatusPill(ready: Boolean) {
             modifier = Modifier
                 .size(9.dp)
                 .clip(RoundedCornerShape(50))
-                .background(if (ready) Palette.ok else Palette.bad),
+                .background(dot),
         )
         Spacer(Modifier.width(8.dp))
-        Text(
-            text = if (ready) "Ready" else "NotReady",
-            color = if (ready) Palette.ok else Palette.bad,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-        )
+        Text(text = label, color = dot, fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -412,14 +428,9 @@ private fun ServicesRow(container: ContainerMetrics?) {
 }
 
 @Composable
-private fun Footer(error: String?, hostAgeSec: Int) {
-    if (error == null && hostAgeSec < 10) return
-    Text(
-        text = error ?: "dados de ${hostAgeSec}s atrás",
-        color = if (error != null) Palette.bad else Palette.muted,
-        fontSize = 11.sp,
-        maxLines = 1,
-    )
+private fun Footer(error: String?) {
+    if (error == null) return
+    Text(text = error, color = Palette.bad, fontSize = 11.sp, maxLines = 1)
 }
 
 private fun pct(value: Int?): String = value?.let { "$it%" } ?: "—"

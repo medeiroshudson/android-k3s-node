@@ -153,6 +153,8 @@ data class ClusterMetrics(
     val memMeasuredKb: Long? = null,
     val cpuUsedCores: Double? = null,
     val memUsedKb: Long? = null,
+    /** Nodes metrics-server actually answered for; empty when it reported none. */
+    val measuredNodes: List<String> = emptyList(),
 ) {
     val cpuPct: Int? get() = percent(cpuUsedCores, cpuMeasuredCores?.toDouble())
     val memPct: Int? get() = percent(memUsedKb?.toDouble(), memMeasuredKb?.toDouble())
@@ -188,6 +190,11 @@ data class ClusterMetrics(
                 memMeasuredKb = c.optLongOrNull("mem_measured_kb"),
                 cpuUsedCores = c.optDoubleOrNull("cpu_used_cores"),
                 memUsedKb = c.optLongOrNull("mem_used_kb"),
+                measuredNodes = c.optStringIfPresent("measured_nodes")
+                    ?.split(',')
+                    ?.map { it.trim() }
+                    ?.filter { it.isNotEmpty() }
+                    ?: emptyList(),
             )
         }.getOrNull()
     }

@@ -28,6 +28,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         // This activity is the home screen: keep the panel lit while charging.
+        // The collector gate needs the application context; every poller below
+        // goes through it before touching the device.
+        RootShell.init(applicationContext)
+
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -45,7 +49,6 @@ class MainActivity : ComponentActivity() {
             // Three cadences: /proc is cheap, droidspaces costs a fork, kubectl
             // costs a round trip and its data only refreshes every 15 s.
             LaunchedEffect(Unit) {
-                withContext(Dispatchers.IO) { RootShell.installCollector(applicationContext) }
                 while (true) {
                     val json = withContext(Dispatchers.IO) { RootShell.collect("host") }
                     if (json != null) {
