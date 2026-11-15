@@ -1,0 +1,13 @@
+# Start the k3s-mobile-1 Droidspaces container after Android finishes booting.
+# Magisk's service.d path is unusable here: its bundled busybox fails with
+# "Exec format error", so every service.d and module script dies before running.
+service k3s-mobile-container /system/bin/sh /data/adb/service.d/k3s-mobile-1.sh
+    class late_start
+    user root
+    group root system
+    seclabel u:r:magisk:s0
+
+    disabled
+
+on property:sys.boot_completed=1
+    start k3s-mobile-container

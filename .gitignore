@@ -1,0 +1,8 @@
+# build output
+kernel/out/
+kernel/*.img
+kernel/*.gz
+
+# local notes
+*.local.md
+.DS_Store
