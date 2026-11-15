@@ -6,12 +6,16 @@
 #
 #   monitor.sh host       every 2 s   (/proc, battery, thermal, disk)
 #   monitor.sh container  every 5 s   (droidspaces + systemd inside the container)
-#   monitor.sh cluster    every 15 s  (k3s node readiness and pod counts)
+#   monitor.sh cluster    every 15 s  (node readiness, capacity, usage, pods)
 #
 # Deliberately shell: one root call per cycle instead of a fork per metric, and
 # the whole contract can be tested from adb without building the app.
+#
+# Forks are the cost here, not bytes read: every `cat`, `grep` or `df` in a $( )
+# spawns a process. Each section therefore makes one pass per source and splits
+# the result with shell parameter expansion instead of calling out again.
 
-export PATH=/sbin:/system/bin:/system/xbin:/vendor/bin:/data/local/Droidspaces/bin:$PATH
+export PATH=/sbin:/system/bin:/system/xbin:/vendor/bin:$PATH
 
 SECTION="${1:-host}"
 DS=/data/local/Droidspaces/bin/droidspaces
@@ -20,16 +24,18 @@ CONTAINER="${CONTAINER:-k3s-mobile-1}"
 json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 num_or_null() { [ -n "$1" ] && printf '%s' "$1" || printf 'null'; }
 
-# Reads one key out of the flat JSON printed by `droidspaces --json show`.
+# `droidspaces --json show` is read once per run: each field lookup used to fork
+# it again, and the container cycle needed seven of them.
+ds_out=""
+load_ds() { [ -n "$ds_out" ] || ds_out="$("$DS" --json show 2>/dev/null)"; }
 ds_field() {
-    ds_json | sed -n "s/.*\"$1\":\([0-9]*\).*/\1/p" | head -1
+    load_ds
+    printf '%s' "$ds_out" | sed -n "s/.*\"$1\":\([0-9]*\).*/\1/p" | head -1
 }
+container_running() { load_ds; printf '%s' "$ds_out" | grep -q "\"name\":\"$CONTAINER\""; }
 
-ds_json() { "$DS" --json show 2>/dev/null; }
-
-container_running() { ds_json | grep -q "\"name\":\"$CONTAINER\""; }
-
-# Runs a command inside the container and prints its stdout.
+# Runs one command string inside the container; every call costs a full
+# droidspaces round trip, so sections batch everything into a single call.
 in_container() {
     "$DS" --name="$CONTAINER" run -- /bin/sh -c "$1" 2>/dev/null
 }
@@ -56,35 +62,31 @@ cpu_pct() {
 
 case "$SECTION" in
 host)
-    mem_total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
-    mem_avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
-    swap_total=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
-    swap_free=$(awk '/^SwapFree:/{print $2}' /proc/meminfo)
+    # One awk over memory info instead of four greps.
+    set -- $(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^SwapTotal:/{st=$2}
+                  /^SwapFree:/{sf=$2} END{print t, a, st, sf}' /proc/meminfo)
+    mem_total=$1; mem_avail=$2; swap_total=$3; swap_free=$4
+
     load1=$(cut -d' ' -f1 /proc/loadavg)
     psi_full=$(sed -n 's/.*full avg10=\([0-9.]*\).*/\1/p' /proc/pressure/memory 2>/dev/null)
+    cores=$(grep -c ^processor /proc/cpuinfo)
 
-    # hottest thermal zone, ignoring the battery zones
-    temp=""
-    for z in /sys/class/thermal/thermal_zone*/temp; do
-        [ -r "$z" ] || continue
-        t=$(cat "$z" 2>/dev/null)
-        [ -n "$t" ] || continue
-        [ "$t" -gt 1000 ] 2>/dev/null || continue
-        if [ -n "$temp" ] && [ "$t" -le "$temp" ]; then continue; fi
-        temp=$t
-    done
-    [ -n "$temp" ] && temp_c=$(awk -v t="$temp" 'BEGIN{printf "%.1f", t/1000}') || temp_c=null
+    # One cat for all 85 thermal zones; 85 forks per cycle was most of the cost.
+    # The hottest zone is the SoC one - battery zones read far lower.
+    temp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null |
+        awk '$1 + 0 > 1000 { if ($1 + 0 > m) m = $1 + 0 } END { if (m > 0) printf "%.1f", m / 1000 }')
+    [ -n "$temp" ] && temp_c=$temp || temp_c=null
 
-    bat_pct=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)
+    set -- $(cat /sys/class/power_supply/battery/capacity /sys/class/power_supply/battery/temp 2>/dev/null)
+    bat_pct=$1; bat_temp=$2
     bat_status=$(cat /sys/class/power_supply/battery/status 2>/dev/null)
-    bat_temp=$(cat /sys/class/power_supply/battery/temp 2>/dev/null)
     [ -n "$bat_temp" ] && bat_temp_c=$(awk -v t="$bat_temp" 'BEGIN{printf "%.1f", t/10}') || bat_temp_c=null
 
     set -- $(df -k /data 2>/dev/null | tail -1)
     data_total=$2; data_free=$4
 
     printf '{"ts":%s,"host":{"load1":%s,"cpu_pct":%s,"cpu_cores":%s,' \
-        "$(date +%s)" "$(num_or_null "$load1")" "$(cpu_pct)" "$(num_or_null "$(grep -c ^processor /proc/cpuinfo)")"
+        "$(date +%s)" "$(num_or_null "$load1")" "$(cpu_pct)" "$(num_or_null "$cores")"
     printf '"mem_total_kb":%s,"mem_avail_kb":%s,"swap_total_kb":%s,"swap_free_kb":%s,' \
         "$(num_or_null "$mem_total")" "$(num_or_null "$mem_avail")" \
         "$(num_or_null "$swap_total")" "$(num_or_null "$swap_free")"
@@ -109,15 +111,24 @@ container)
     cpu_permill=$(ds_field cpu_permill)
     cpu_limit=$(ds_field cpu_limit_permill)
 
-    # Denominator for cpu_permill: droidspaces measures against the container's
-    # own CPU count, which is not the host's (6 visible outside, 8 inside).
-    cores=$(in_container 'grep -c ^processor /proc/cpuinfo' | tr -d ' \r')
+    # Cores, disk and service states in a single round trip, separated by "~":
+    # mksh (Android's /system/bin/sh) reads "|" as alternation inside ${var%%|*},
+    # where the split silently returns an empty string.
+    # /proc/cpuinfo, not nproc: nproc reports the affinity mask of the calling
+    # process and answered 6 and 7 on an 8-core phone.
+    body=$(in_container '
+        c=$(grep -c ^processor /proc/cpuinfo)
+        set -- $(df -k / | tail -1)
+        s=""
+        for x in k3s-agent docker ssh tailscaled; do s="$s$x=$(systemctl is-active $x 2>/dev/null) "; done
+        printf "%s~%s %s~%s" "$c" "$2" "$4" "$s"')
 
-    disk=$(in_container 'df -k / | tail -1 | awk "{print \$2, \$4}"')
-    disk_total=$(printf '%s' "$disk" | cut -d' ' -f1)
-    disk_free=$(printf '%s' "$disk" | cut -d' ' -f2)
-
-    services=$(in_container 'for s in k3s-agent docker ssh tailscaled; do printf "%s=%s " "$s" "$(systemctl is-active $s 2>/dev/null)"; done')
+    cores=${body%%~*}
+    rest=${body#*~}
+    disk_part=${rest%%~*}
+    services=${rest#*~}
+    disk_total=${disk_part%% *}
+    disk_free=${disk_part##* }
 
     printf '{"ts":%s,"container":{"name":%s,"state":"running","pid":%s,"uptime_sec":%s,' \
         "$(date +%s)" "$(json_str "$CONTAINER")" "$(num_or_null "$pid")" "$(num_or_null "$uptime")"
@@ -137,28 +148,28 @@ cluster)
         exit 0
     fi
 
-    node=$(in_container "kubectl get node $CONTAINER --no-headers 2>/dev/null")
-    ready=$(printf '%s' "$node" | awk '{print $2}')
-    version=$(printf '%s' "$node" | awk '{print $5}')
-    pods_total=$(in_container 'kubectl get pods -A --no-headers 2>/dev/null | wc -l' | tr -d ' ')
-    pods_running=$(in_container 'kubectl get pods -A --no-headers 2>/dev/null | grep -c Running' | tr -d ' ')
+    # One round trip for the whole cluster view: capacity and readiness of every
+    # node (one listing, so they cannot disagree), usage from metrics-server and
+    # the pod tally.
+    body=$(in_container '
+        printf "@@nodes\n"
+        kubectl get nodes --no-headers -o custom-columns="N:.metadata.name,R:.status.conditions[?(@.type==\"Ready\")].status,C:.status.capacity.cpu,M:.status.capacity.memory,V:.status.nodeInfo.kubeletVersion" 2>/dev/null
+        printf "@@top\n"
+        kubectl top nodes --no-headers 2>/dev/null
+        printf "@@pods\n"
+        kubectl get pods -A --no-headers 2>/dev/null')
 
-    [ "$ready" = "Ready" ] && ready_js=true || ready_js=false
-
-    # Cluster capacity comes from the node objects; usage from metrics-server,
-    # which today only scrapes the master (the local and mobile kubelets time
-    # out), so "reporting" counts only nodes with real numbers. Capacity is
-    # aggregated twice: over every node, and over the nodes that report, so the
-    # percentage is compared against what is actually measured.
-    caps=$(in_container 'kubectl get nodes --no-headers -o custom-columns=N:.metadata.name,CPU:.status.capacity.cpu,MEM:.status.capacity.memory 2>/dev/null')
-    status=$(in_container 'kubectl get nodes --no-headers 2>/dev/null')
-    usage=$(in_container 'kubectl top nodes --no-headers 2>/dev/null')
-
-    agg=$(printf '%s\n---\n%s\n---\n%s\n' "$caps" "$status" "$usage" | awk '
+    # Capacity is aggregated twice: over every node, and over the nodes
+    # metrics-server actually answers for. The percentage is then computed
+    # against the measured capacity, so it is never read as the whole cluster
+    # when only part of it is scraped.
+    agg=$(printf '%s\n' "$body" | awk -v want="$CONTAINER" '
         function cores(v,   n,u) {
             if (v == "") return 0
             u = v; sub(/[0-9.]+/, "", u)
             n = v; sub(/[a-zA-Z]+$/, "", n)
+            if (u == "n") return n / 1000000000
+            if (u == "u") return n / 1000000
             if (u == "m") return n / 1000
             return n + 0
         }
@@ -171,32 +182,43 @@ cluster)
             if (u == "Gi") return n * 1048576
             return n / 1024
         }
-        /^---$/ { section++; next }
-        section == 0 && NF >= 3 {
-            cpu[$1] = cores($2); mem[$1] = kib($3)
+        /^@@nodes/ { sec = "nodes"; next }
+        /^@@top/   { sec = "top"; next }
+        /^@@pods/  { sec = "pods"; next }
+        sec == "nodes" && NF >= 5 {
+            cpu[$1] = cores($3); mem[$1] = kib($4)
             nodes++
-            cap_cpu += cores($2); cap_mem += kib($3)
+            if ($2 == "True") ready_nodes++
+            cap_cpu += cores($3); cap_mem += kib($4)
+            if ($1 == want) { node_ready = $2; node_version = $5 }
             next
         }
-        section == 1 && NF >= 2 {
-            if ($2 == "Ready") ready_nodes++
-            next
-        }
-        section == 2 && NF >= 5 && $2 ~ /^[0-9.]+m?$/ {
+        sec == "top" && NF >= 5 && $2 ~ /^[0-9.]+[mun]?$/ {
+            # only lines with real numbers: a node metrics-server cannot scrape
+            # prints <unknown> and is not coverage
             reporting++
             used_cpu += cores($2); used_mem += kib($4)
             rep_cpu += cpu[$1];     rep_mem += mem[$1]
+            next
+        }
+        sec == "pods" && NF >= 4 {
+            pods_total++
+            if ($4 == "Running") pods_running++
         }
         END {
-            printf "%d %d %d %.2f %.0f %.2f %.0f %.2f %.0f", nodes, ready_nodes,
-                   reporting, cap_cpu, cap_mem, rep_cpu, rep_mem, used_cpu, used_mem
+            printf "%d %d %d %.2f %.0f %.2f %.0f %.2f %.0f %d %d %s %s", nodes,
+                   ready_nodes, reporting, cap_cpu, cap_mem, rep_cpu, rep_mem,
+                   used_cpu, used_mem, pods_total, pods_running,
+                   (node_ready == "" ? "unknown" : node_ready),
+                   (node_version == "" ? "" : node_version)
         }')
 
     set -- $agg
+    [ "${12}" = "True" ] && ready_js=true || ready_js=false
+
     printf '{"ts":%s,"cluster":{"node":%s,"ready":%s,"pods_total":%s,"pods_running":%s,"k3s_version":%s,' \
         "$(date +%s)" "$(json_str "$CONTAINER")" "$ready_js" \
-        "$(num_or_null "$pods_total")" "$(num_or_null "$pods_running")" \
-        "$(json_str "$version")"
+        "$(num_or_null "${10}")" "$(num_or_null "${11}")" "$(json_str "${13}")"
     printf '"nodes_total":%s,"nodes_ready":%s,"nodes_reporting":%s,' \
         "$(num_or_null "$1")" "$(num_or_null "$2")" "$(num_or_null "$3")"
     printf '"cpu_capacity_cores":%s,"mem_capacity_kb":%s,' \

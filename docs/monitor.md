@@ -67,6 +67,20 @@ Why this way:
 The three pollers share one root shell, so `RootShell.collect` holds a `Mutex`: without it
 the writes and reads interleave and a section comes back empty (the UI then shows `—`).
 
+### Cost per cycle
+
+Measured on the device with `/proc/uptime`, after batching every section into one pass
+per source:
+
+| Section | Before | Now | Why it was slow |
+|---|---|---|---|
+| host | 2.53 s | 1.15 s | 85 `cat`s, one per thermal zone; four greps over `/proc/meminfo` |
+| container | 2.92 s | 1.05 s | `droidspaces --json show` forked once per field (seven times), plus three round trips |
+| cluster | 8.31 s | 5.30 s | one round trip per kubectl call; now a single round trip carrying all three |
+
+Forks are the cost on Android, not bytes. The lesson generalises: read a source once and
+split the result in the shell, do not call out per field.
+
 Two measurement traps worth keeping in mind when editing the collector:
 
 - `nproc` reports the affinity mask of the calling process, not the CPU count: through
@@ -75,6 +89,9 @@ Two measurement traps worth keeping in mind when editing the collector:
 - `cpu_permill` is permille of the container's whole capacity, verified by saturating cores:
   one busy loop reports ~127 with 8 cores, three report ~383 (`1000/8 = 125` per core).
   It is not a percentage and not per-core.
+- `/system/bin/sh` is mksh, where `|` is alternation inside `${var%%|*}`: the split
+  returns an empty string instead of failing loudly. Field separators in the collector
+  use `~`, not `|`.
 
 ## Install
 

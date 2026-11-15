@@ -148,7 +148,13 @@ private fun NodeCard(container: ContainerMetrics?, modifier: Modifier = Modifier
         cpuDetail = if (running) {
             val used = container?.cpuCoresUsed
             val cores = container?.cpuCores
-            if (used != null && cores != null) "%.1f de %d núcleos".format(used, cores) else "—"
+            when {
+                used == null || cores == null -> "—"
+                // 1% and "0,0 of 8 cores" contradict each other; below a tenth
+                // of a core the honest statement is that it is under one tenth.
+                used < 0.05 -> "<0,1 de $cores núcleos"
+                else -> "%.1f de %d núcleos".format(used, cores)
+            }
         } else "container não iniciado",
         ramPercent = if (running) container?.ramUsedPct else null,
         ramValue = if (running) pct(container?.ramUsedPct) else "—",
