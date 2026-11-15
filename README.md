@@ -23,6 +23,7 @@ cgroup v1**, which AOSP explicitly supports on Android 16.
 | `kernel/` | Defconfig fragment (namespaces, cgroups, overlayfs, veth/bridge, VXLAN, nftables), the two source fixes a 4.19 tree needs with modern compilers, and build/repack scripts for `boot.img` |
 | `android/` | The `/system/etc/cgroups.json` override, the init service that starts the container at boot, and its supervisor script |
 | `scripts/` | `apply-system-overrides.sh`, `install-boot-hook.sh`, `verify-node.sh`, `after-ota.sh` |
+| `monitor/` | Android home-screen app that shows node and container utilisation (see `docs/monitor.md`) |
 | `docs/` | Why the cgroups split exists (with AOSP commits), kernel build traps, container setup, boot integration, operations and rollback |
 
 ## Tested on

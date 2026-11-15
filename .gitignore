@@ -6,3 +6,10 @@ kernel/*.gz
 # local notes
 *.local.md
 .DS_Store
+
+# android monitor build
+monitor/.gradle/
+monitor/build/
+monitor/app/build/
+monitor/local.properties
+*.apk

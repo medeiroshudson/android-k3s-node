@@ -10,6 +10,7 @@ help:
 	@echo "  verify           check memory cgroup v1, container and node Ready"
 	@echo "  after-ota        re-apply everything after a LineageOS OTA and verify"
 	@echo "  kernel           build the kernel and repack boot.img (see docs/kernel.md)"
+	@echo "  monitor          build the monitor APK and push the collector (docs/monitor.md)"
 
 apply-override:
 	./scripts/apply-system-overrides.sh --apply
@@ -25,3 +26,10 @@ after-ota:
 
 kernel:
 	cd kernel && ./build.sh && ./repack-boot.sh
+
+monitor:
+	export JAVA_HOME=/opt/homebrew/opt/openjdk@17; \
+	export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools; \
+	cd monitor && ./gradlew assembleDebug --console=plain
+	adb push monitor/device/monitor.sh /data/local/tmp/monitor.sh
+	adb shell su -c 'mkdir -p /data/local/Droidspaces/monitor && cp /data/local/tmp/monitor.sh /data/local/Droidspaces/monitor/monitor.sh && chmod 755 /data/local/Droidspaces/monitor/monitor.sh'
