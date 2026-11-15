@@ -84,7 +84,7 @@ host)
     data_total=$2; data_free=$4
 
     printf '{"ts":%s,"host":{"load1":%s,"cpu_pct":%s,"cpu_cores":%s,' \
-        "$(date +%s)" "$(num_or_null "$load1")" "$(cpu_pct)" "$(num_or_null "$(nproc)")"
+        "$(date +%s)" "$(num_or_null "$load1")" "$(cpu_pct)" "$(num_or_null "$(grep -c ^processor /proc/cpuinfo)")"
     printf '"mem_total_kb":%s,"mem_avail_kb":%s,"swap_total_kb":%s,"swap_free_kb":%s,' \
         "$(num_or_null "$mem_total")" "$(num_or_null "$mem_avail")" \
         "$(num_or_null "$swap_total")" "$(num_or_null "$swap_free")"
@@ -109,6 +109,10 @@ container)
     cpu_permill=$(ds_field cpu_permill)
     cpu_limit=$(ds_field cpu_limit_permill)
 
+    # Denominator for cpu_permill: droidspaces measures against the container's
+    # own CPU count, which is not the host's (6 visible outside, 8 inside).
+    cores=$(in_container 'grep -c ^processor /proc/cpuinfo' | tr -d ' \r')
+
     disk=$(in_container 'df -k / | tail -1 | awk "{print \$2, \$4}"')
     disk_total=$(printf '%s' "$disk" | cut -d' ' -f1)
     disk_free=$(printf '%s' "$disk" | cut -d' ' -f2)
@@ -117,8 +121,9 @@ container)
 
     printf '{"ts":%s,"container":{"name":%s,"state":"running","pid":%s,"uptime_sec":%s,' \
         "$(date +%s)" "$(json_str "$CONTAINER")" "$(num_or_null "$pid")" "$(num_or_null "$uptime")"
-    printf '"cpu_permill":%s,"cpu_limit_permill":%s,"ram_used_kb":%s,"ram_limit_kb":%s,' \
-        "$(num_or_null "$cpu_permill")" "$(num_or_null "$cpu_limit")" \
+    printf '"cpu_permill":%s,"cpu_limit_permill":%s,"cpu_cores":%s,' \
+        "$(num_or_null "$cpu_permill")" "$(num_or_null "$cpu_limit")" "$(num_or_null "$cores")"
+    printf '"ram_used_kb":%s,"ram_limit_kb":%s,' \
         "$(num_or_null "$ram_used")" "$(num_or_null "$ram_limit")"
     printf '"disk_total_kb":%s,"disk_free_kb":%s,"services":%s}}\n' \
         "$(num_or_null "$disk_total")" "$(num_or_null "$disk_free")" \
@@ -140,10 +145,66 @@ cluster)
 
     [ "$ready" = "Ready" ] && ready_js=true || ready_js=false
 
-    printf '{"ts":%s,"cluster":{"node":%s,"ready":%s,"pods_total":%s,"pods_running":%s,"k3s_version":%s}}\n' \
+    # Cluster capacity comes from the node objects; usage from metrics-server,
+    # which today only scrapes the master (the local and mobile kubelets time
+    # out), so "reporting" counts only nodes with real numbers. Capacity is
+    # aggregated twice: over every node, and over the nodes that report, so the
+    # percentage is compared against what is actually measured.
+    caps=$(in_container 'kubectl get nodes --no-headers -o custom-columns=N:.metadata.name,CPU:.status.capacity.cpu,MEM:.status.capacity.memory 2>/dev/null')
+    status=$(in_container 'kubectl get nodes --no-headers 2>/dev/null')
+    usage=$(in_container 'kubectl top nodes --no-headers 2>/dev/null')
+
+    agg=$(printf '%s\n---\n%s\n---\n%s\n' "$caps" "$status" "$usage" | awk '
+        function cores(v,   n,u) {
+            if (v == "") return 0
+            u = v; sub(/[0-9.]+/, "", u)
+            n = v; sub(/[a-zA-Z]+$/, "", n)
+            if (u == "m") return n / 1000
+            return n + 0
+        }
+        function kib(v,   n,u) {
+            if (v == "") return 0
+            u = v; sub(/[0-9.]+/, "", u)
+            n = v; sub(/[a-zA-Z]+$/, "", n)
+            if (u == "Ki") return n + 0
+            if (u == "Mi") return n * 1024
+            if (u == "Gi") return n * 1048576
+            return n / 1024
+        }
+        /^---$/ { section++; next }
+        section == 0 && NF >= 3 {
+            cpu[$1] = cores($2); mem[$1] = kib($3)
+            nodes++
+            cap_cpu += cores($2); cap_mem += kib($3)
+            next
+        }
+        section == 1 && NF >= 2 {
+            if ($2 == "Ready") ready_nodes++
+            next
+        }
+        section == 2 && NF >= 5 && $2 ~ /^[0-9.]+m?$/ {
+            reporting++
+            used_cpu += cores($2); used_mem += kib($4)
+            rep_cpu += cpu[$1];     rep_mem += mem[$1]
+        }
+        END {
+            printf "%d %d %d %.2f %.0f %.2f %.0f %.2f %.0f", nodes, ready_nodes,
+                   reporting, cap_cpu, cap_mem, rep_cpu, rep_mem, used_cpu, used_mem
+        }')
+
+    set -- $agg
+    printf '{"ts":%s,"cluster":{"node":%s,"ready":%s,"pods_total":%s,"pods_running":%s,"k3s_version":%s,' \
         "$(date +%s)" "$(json_str "$CONTAINER")" "$ready_js" \
         "$(num_or_null "$pods_total")" "$(num_or_null "$pods_running")" \
         "$(json_str "$version")"
+    printf '"nodes_total":%s,"nodes_ready":%s,"nodes_reporting":%s,' \
+        "$(num_or_null "$1")" "$(num_or_null "$2")" "$(num_or_null "$3")"
+    printf '"cpu_capacity_cores":%s,"mem_capacity_kb":%s,' \
+        "$(num_or_null "$4")" "$(num_or_null "$5")"
+    printf '"cpu_measured_cores":%s,"mem_measured_kb":%s,' \
+        "$(num_or_null "$6")" "$(num_or_null "$7")"
+    printf '"cpu_used_cores":%s,"mem_used_kb":%s}}\n' \
+        "$(num_or_null "$8")" "$(num_or_null "$9")"
     ;;
 
 *)
