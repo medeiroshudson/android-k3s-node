@@ -56,15 +56,16 @@ host distributions in this fleet already use. Two settings are mandatory on a 4.
 ```json
 {
   "exec-opts": ["native.cgroupdriver=cgroupfs"],
-  "log-driver": "local",
+  "log-driver": "json-file",
   "log-opts": { "max-size": "10m", "max-file": "2" }
 }
 ```
 
 - **`cgroupfs`** matches `kubelet`; mixing drivers is unsupported. With the cgroups
   override, `memory` lives in v1 and Docker sees it.
-- **`local` logging** matters because the container's journal and Docker logs live inside
-  a sparse image; `json-file` grows without limit.
+- **Rotated `json-file` logging** matters because logs live inside a sparse image. Do not
+  switch to the `local` driver: with k3s's Docker runtime, `kubectl logs` reads
+  `/var/log/pods/*.log` and fails with `no such file or directory` on `local`.
 
 ### The `cpuset` workaround
 

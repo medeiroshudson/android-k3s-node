@@ -55,7 +55,7 @@ painful to diagnose.
 | container memory cap | 4 GiB | without it a runaway pod OOMs Android; `kubelet` advertises `capacity/allocatable = 4Gi` |
 | rootfs image | 64 GB sparse | `/data` has 101 GB free; growth is on demand |
 | journald | `SystemMaxUse=200M`, runtime 64M, 14 days | the journal lives inside the sparse image |
-| Docker logging | `local`, 10 MB × 2 | `json-file` grows unbounded inside the image |
+| Docker logging | `json-file`, 10 MB × 2 | unbounded without rotation; `local` breaks `kubectl logs` on k3s+Docker |
 | `fstrim.timer` | weekly | returns free blocks to the filesystem; the first run released **21 GiB** |
 | `tailscale0` MTU | 1280 | tailscaled's default; avoids fragmentation on the VPS↔phone path |
 
@@ -70,6 +70,23 @@ resize2fs rootfs.img
 
 Watch `cat /proc/pressure/memory` after tightening the cap; `full avg10` climbing above
 ~5 under idle means Android is short on memory and the cap should go down.
+
+## Cluster pods cannot reach each other (flannel orphaned)
+
+Symptom: a pod on the phone resolves the internet but nothing inside the cluster;
+`postgresql.infra.svc.cluster.local` times out and DNS to `10.43.0.10` fails.
+
+Cause: flannel's VXLAN device is created at k3s start and bound to `tailscale0`. If
+`tailscaled` restarts afterwards, the interface is recreated and `flannel.1` on the
+server is left orphaned:
+
+```bash
+ip -o link show flannel.1          # missing on the server
+ip route | grep 10.42.             # only its own CIDR via cni0
+```
+
+Fix: `systemctl restart k3s` on the server. The API is unavailable for a few seconds;
+running pods are not restarted.
 
 ## Rollback
 
