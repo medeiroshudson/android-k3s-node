@@ -47,6 +47,27 @@ else
     warn "container $CONTAINER not running"; fail=1
 fi
 
+say "32-bit process compatibility"
+# A container's systemd raises the kernel-global pid_max to PID_MAX_LIMIT. On
+# 4.19 that value is shared by every pid namespace, so it reaches Android, and
+# bionic refuses to start any 32-bit process once the pid exceeds 65535
+# (pthread_mutex_t stores the TID in 16 bits). Every armeabi-v7a app then dies
+# with "start timeout" and no log line. patch 0004 clamps the ceiling.
+pidmax="$(run_root 'cat /proc/sys/kernel/pid_max' 2>/dev/null | tr -d "\r" | tr -cd "0-9")"
+if [ -z "${pidmax:-}" ]; then
+    warn "could not read /proc/sys/kernel/pid_max"; fail=1
+elif [ "$pidmax" -le 65535 ]; then
+    ok "pid_max=$pidmax - 32-bit processes can start"
+else
+    warn "pid_max=$pidmax > 65535 - every 32-bit app will fail to start; kernel lacks patch 0004"; fail=1
+fi
+
+if run_root 'timeout 10 /system/bin/app_process32 --nice-name=verify32 2>&1 | head -3' 2>/dev/null | grep -q "only supports pids"; then
+    warn "bionic refused to start a 32-bit process"; fail=1
+else
+    ok "app_process32 starts"
+fi
+
 say "agent inside the container"
 if run_root "$DS_BIN --name=$CONTAINER run -- systemctl is-active k3s-agent" 2>/dev/null | grep -q '^active'; then
     ok "k3s-agent active"

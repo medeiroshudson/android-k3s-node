@@ -139,6 +139,38 @@ preserved.
 
 Keep a copy of the stock image as your rollback and flash only the `boot` partition.
 
+## pid_max: why 32-bit apps stop starting
+
+A container's systemd raises `kernel.pid_max` to `PID_MAX_LIMIT` (4194304) at startup, because
+that is what systemd does on any 64-bit host. On 4.19 `pid_max` is a single global variable in
+`kernel/pid.c`, shared by every pid namespace, so that write reaches Android as well.
+
+bionic then refuses to start any 32-bit process, and the rejection is easy to misread:
+
+```
+32-bit pthread_mutex_t only supports pids <= 65535; current pid 1222771;
+`echo 65535 > /proc/sys/kernel/pid_max` as root
+```
+
+`pthread_mutex_t` stores the TID in 16 bits, so a pid above 65535 is unusable for a 32-bit
+process. What the user sees is not a crash: `ActivityManager` kills the app with
+`start timeout` and the process emits no log line at all, which looks like a hung or blocked
+app rather than a kernel-wide pid exhaustion. Every `armeabi-v7a` app breaks at once — on this
+device that included the Tuya Smart client.
+
+`patches/0004-pid-max-clamp.sh` lowers `pid_max_max`, the ceiling the sysctl validates writes
+against, to 65535. The container's write then fails with `EINVAL` and the boot default (32768)
+survives. `scripts/verify-node.sh` asserts this after the container is up, plus a smoke test of
+`/system/bin/app_process32`.
+
+The trade-off is deliberate: no pid namespace can exceed 65535 pids. A phone-sized k3s node
+runs far below that. Needing more means backporting per-namespace `pid_max` from 5.x, not
+raising this ceiling.
+
+Fixing it from userspace is not a substitute: `sysctl -w kernel.pid_max=32768` works at runtime,
+but the container rewrites it on its next start, and the device is broken again after every
+reboot.
+
 ## Devices this was verified on
 
 `r8q` / SM-G780G, LineageOS 23.2, kernel 4.19.325-cip136-st20, Magisk 31.1. The commit

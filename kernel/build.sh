@@ -19,6 +19,10 @@ cd "$KDIR"
 echo "==> applying patches"
 "$HERE/patches/0001-extern-inline-need-memory-boosting.sh" .
 "$HERE/patches/0003-memcg-usage-hierarchical.sh" .
+"$HERE/patches/0004-pid-max-clamp.sh" .
+# 0002 (cnss event guard) is intentionally NOT applied: it exists for GCC builds,
+# which this script refuses, and it trades Wi-Fi for the crash. See
+# docs/kernel.md -- the compiler assertion below is what keeps it unnecessary.
 
 echo "==> installing the defconfig fragment"
 cp "$HERE/k3s-droidspaces.config" arch/arm64/configs/
@@ -39,6 +43,18 @@ scripts/kconfig/merge_config.sh -O out out/.config \
     arch/arm64/configs/vendor/samsung/r8q.config \
     arch/arm64/configs/k3s-droidspaces.config
 make O=out "${MAKE_ARGS[@]}" olddefconfig
+
+echo "==> checking the toolchain"
+# This tree's Makefile assigns CC = $(CROSS_COMPILE)gcc, which overrides the
+# environment: exporting CC=clang is enough to silently build with GCC and hit
+# the cnss list corruption ~25 s after boot. Assert the config, not the intent.
+if ! grep -q "^CONFIG_CC_IS_CLANG=y" out/.config; then
+    echo "  kernel would be built with $(grep -m1 '^CONFIG_CC_IS_' out/.config || echo 'an unknown compiler')" >&2
+    echo "  refusing: GCC builds net this tree a cnss panic (see docs/kernel.md)" >&2
+    echo "  if you really need GCC, apply patches/0002-cnss-event-work-guard.sh and accept no Wi-Fi" >&2
+    exit 1
+fi
+echo "  clang confirmed (CONFIG_CC_IS_CLANG=y)"
 
 echo "==> checking that the container options survived the merge"
 missing=0
