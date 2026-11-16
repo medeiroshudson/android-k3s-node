@@ -18,6 +18,7 @@ cd "$KDIR"
 
 echo "==> applying patches"
 "$HERE/patches/0001-extern-inline-need-memory-boosting.sh" .
+"$HERE/patches/0003-memcg-usage-hierarchical.sh" .
 
 echo "==> installing the defconfig fragment"
 cp "$HERE/k3s-droidspaces.config" arch/arm64/configs/
