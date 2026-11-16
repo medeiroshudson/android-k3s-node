@@ -26,6 +26,18 @@ cgroup v1**, which AOSP explicitly supports on Android 16.
 | `monitor/` | Android home-screen app that shows node and container utilisation (see `docs/monitor.md`) |
 | `docs/` | Why the cgroups split exists (with AOSP commits), kernel build traps, container setup, boot integration, operations and rollback |
 
+## What it looks like
+
+The device boots into the panel instead of a launcher, so the node's state is the first
+thing on screen:
+
+![Monitor panel: host, node and cluster CPU and memory](docs/images/monitor-panel.png)
+
+Three cards with the same shape and different scope — the phone, the container that runs
+`kubelet`, and the cluster. The cluster card names the nodes `metrics-server` actually
+answered for: in this shot `k3s-local` is powered off, so it says `2 de 3 nós` in amber
+instead of passing one node's numbers as the whole cluster. See `docs/monitor.md`.
+
 ## Tested on
 
 | Device | Model | SoC | ROM | Kernel | Runtime |
