@@ -171,6 +171,23 @@ Fixing it from userspace is not a substitute: `sysctl -w kernel.pid_max=32768` w
 but the container rewrites it on its next start, and the device is broken again after every
 reboot.
 
+## CPU limits: why FAIR_GROUP_SCHED stays off
+
+`CONFIG_FAIR_GROUP_SCHED` is off in the stock Samsung config, and off in the kernel
+verified here (`# CONFIG_FAIR_GROUP_SCHED is not set`, with `CONFIG_CFS_BANDWIDTH` not
+present at all). It was briefly enabled during bring-up as `K3S-EXTRA` and did not survive,
+so the fragment now keeps it off and `build.sh` refuses a config that turns it back on.
+
+Measured consequence on the node: `/dev/cpuctl/cpu.cfs_quota_us` and
+`cpu.cfs_period_us` do not exist, so a pod that declares `limits.cpu` gets no CFS quota —
+the runtime has no file to write. `cpuacct` still accounts usage, which is why
+`kubectl top` keeps reporting CPU for the node and its pods. Only *enforcement* is
+missing, and that is the state the hardware was validated in.
+
+Re-enabling it is not a one-line change: `cpu.cfs_quota_us` changes the v1 cpu hierarchy
+that the container and the kubelet already depend on, so it needs the same validation the
+memory move got (docs/why-cgroups.md).
+
 ## Devices this was verified on
 
 `r8q` / SM-G780G, LineageOS 23.2, kernel 4.19.325-cip136-st20, Magisk 31.1. The commit

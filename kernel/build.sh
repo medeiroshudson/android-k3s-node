@@ -18,11 +18,12 @@ cd "$KDIR"
 
 echo "==> applying patches"
 "$HERE/patches/0001-extern-inline-need-memory-boosting.sh" .
+"$HERE/patches/0002-cnss-event-work-guard.sh" .
 "$HERE/patches/0003-memcg-usage-hierarchical.sh" .
 "$HERE/patches/0004-pid-max-clamp.sh" .
-# 0002 (cnss event guard) is intentionally NOT applied: it exists for GCC builds,
-# which this script refuses, and it trades Wi-Fi for the crash. See
-# docs/kernel.md -- the compiler assertion below is what keeps it unnecessary.
+# 0002 is inert under clang (the race only opens in a GCC build) but it is applied
+# for parity with the kernel that is verified on hardware. The compiler assertion
+# below is what keeps a GCC build from ever being produced here.
 
 echo "==> installing the defconfig fragment"
 cp "$HERE/k3s-droidspaces.config" arch/arm64/configs/
@@ -55,6 +56,17 @@ if ! grep -q "^CONFIG_CC_IS_CLANG=y" out/.config; then
     exit 1
 fi
 echo "  clang confirmed (CONFIG_CC_IS_CLANG=y)"
+
+# The verified kernel has FAIR_GROUP_SCHED off (stock Samsung config has it off too).
+# Turning it on brings cpu.cfs_quota_us into the v1 cpu hierarchy, which changes the
+# layout the container and the kubelet already depend on. Refuse the drift instead of
+# shipping a kernel nobody validated.
+if grep -q "^CONFIG_FAIR_GROUP_SCHED=y" out/.config; then
+    echo "  FAIR_GROUP_SCHED is on: this is not the validated configuration" >&2
+    echo "  see docs/kernel.md (CPU limits) and docs/why-cgroups.md" >&2
+    exit 1
+fi
+echo "  FAIR_GROUP_SCHED off, as verified"
 
 echo "==> checking that the container options survived the merge"
 missing=0

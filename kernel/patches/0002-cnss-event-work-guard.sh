@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# OPTIONAL. Only needed if you build this tree with GCC instead of clang.
+# Applied by build.sh, for parity with the kernel verified on hardware. It is inert
+# under clang: the window described below only opens in a GCC build, and build.sh
+# refuses to produce one.
 #
 # cnss_probe() calls cnss_set_plat_priv(), which publishes the global plat_env,
 # BEFORE cnss_event_work_init() has run alloc_workqueue() and
@@ -29,10 +31,20 @@ import sys
 p = sys.argv[1]
 src = open(p, encoding="utf-8", errors="surrogateescape").read()
 anchor = '\tif (!plat_priv)\n\t\treturn -ENODEV;\n\n\tcnss_pr_dbg("Posting event:'
+# Check the guard BEFORE the anchor: once the guard is in place the anchor no longer
+# exists, so testing the anchor first would fail a re-run instead of reporting it as
+# already applied. build.sh applies this patch on every build.
+#
+# The detector must be the guard itself, not just "if (!plat_priv->event_wq)":
+# cnss_event_work_init() contains that same test against the newly allocated
+# workqueue, so the short form matches pristine source and the patch would report
+# "already applied" on a tree that has nothing.
+guard_marker = 'if (!plat_priv->event_wq)\n\t\treturn -EAGAIN;'
+if guard_marker in src:
+    print("already applied")
+    raise SystemExit(0)
 if src.count(anchor) != 1:
     sys.exit("anchor not found exactly once - refusing to edit")
-if "if (!plat_priv->event_wq)" in src:
-    sys.exit("guard already present")
 guard = (
     '\tif (!plat_priv)\n\t\treturn -ENODEV;\n\n'
     '\t/*\n'
